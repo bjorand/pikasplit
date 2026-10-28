@@ -434,7 +434,7 @@ func paint(h uintptr) {
 	text := status
 	statusMu.Unlock()
 	if suspended {
-		text = "Capture en pause — cliquez dans la fenêtre pour reprendre"
+		text = "Capture paused — click in the window to resume"
 	}
 	s, _ := syscall.UTF16FromString(text)
 	pSetTextColor.Call(hdc, 0x00E0E0E0)

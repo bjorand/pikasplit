@@ -57,7 +57,7 @@ func run(listen string, pair bool, name string, keys keymap.Options) error {
 	if err != nil {
 		return err
 	}
-	log.Printf("pikasplit-host %q en écoute sur %s (code %s)", name, ln.Addr(), id.Fingerprint.ShortCode())
+	log.Printf("pikasplit-host %q listening on %s (code %s)", name, ln.Addr(), id.Fingerprint.ShortCode())
 
 	if pair {
 		pin, err := h.StartPairing(5 * time.Minute)
@@ -69,7 +69,7 @@ func run(listen string, pair bool, name string, keys keymap.Options) error {
 		if a := net.ParseIP(ip); a == nil || a.IsUnspecified() {
 			ips = localIPs()
 		}
-		fmt.Printf("\nAppairage ouvert 5 minutes. Sur le PC :\n\n")
+		fmt.Printf("\nPairing open for 5 minutes. On the PC:\n\n")
 		for _, ip := range ips {
 			fmt.Printf("  pikasplit-view -host %s -pair %s -pin %s\n",
 				net.JoinHostPort(ip, port), id.Fingerprint.ShortCode(), pin)
@@ -105,7 +105,7 @@ type server struct {
 }
 
 func (s *server) serve(c *transport.Conn) {
-	log.Printf("viewer %q connecté depuis %s", c.PeerName, c.RemoteAddr())
+	log.Printf("viewer %q connected from %s", c.PeerName, c.RemoteAddr())
 	s.mu.Lock()
 	if s.current != nil {
 		s.current.Close()
@@ -126,7 +126,7 @@ func (s *server) serve(c *transport.Conn) {
 	for {
 		m, err := c.Recv()
 		if err != nil {
-			log.Printf("viewer %q déconnecté: %v", c.PeerName, err)
+			log.Printf("viewer %q disconnected: %v", c.PeerName, err)
 			return
 		}
 		s.mu.Lock()
@@ -149,7 +149,7 @@ func localIPs() []string {
 		}
 	}
 	if len(ips) == 0 {
-		ips = []string{"<ip-du-mac>"}
+		ips = []string{"<mac-ip>"}
 	}
 	return ips
 }

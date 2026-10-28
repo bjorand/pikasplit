@@ -63,11 +63,11 @@ func run(addr, pairCode, pin, name string) error {
 		if err := hosts.Replace(c.PeerFingerprint, addr); err != nil {
 			return err
 		}
-		log.Printf("appairé avec %q (%s)", c.PeerName, addr)
+		log.Printf("paired with %q (%s)", c.PeerName, addr)
 	}
 	hostFP, ok := hosts.FindByName(addr)
 	if !ok {
-		return fmt.Errorf("%s n'est pas appairé : lancez pikasplit-host -pair sur le Mac puis la commande qu'il affiche", addr)
+		return fmt.Errorf("%s is not paired: run pikasplit-host -pair on the Mac, then the command it prints", addr)
 	}
 
 	v := &viewer{
@@ -77,7 +77,7 @@ func run(addr, pairCode, pin, name string) error {
 		pressed: map[uint16]bool{},
 		start:   time.Now(),
 	}
-	v.status("Connexion…")
+	v.status("Connecting…")
 	go v.connectLoop()
 	go v.pingLoop()
 
@@ -159,7 +159,7 @@ func (v *viewer) connectLoop() {
 			c, err := transport.Dial(ctx, v.addr, v.dial)
 			cancel()
 			if err != nil {
-				v.status(fmt.Sprintf("Mac injoignable (%v), nouvel essai…", err))
+				v.status(fmt.Sprintf("Mac unreachable (%v), retrying…", err))
 				time.Sleep(backoff)
 				backoff = min(2*backoff, 10*time.Second)
 				continue
@@ -177,14 +177,14 @@ func (v *viewer) connectLoop() {
 		select {
 		case c := <-connected:
 			conn = c
-			v.status(fmt.Sprintf("Connecté à %s — cliquez ici pour piloter le Mac · Ctrl+Alt+Fin pour libérer", c.PeerName))
+			v.status(fmt.Sprintf("Connected to %s — click here to control the Mac · Ctrl+Alt+End to release", c.PeerName))
 			if lastResize != nil {
 				conn.Send(lastResize)
 			}
 		case c := <-lost:
 			if conn == c {
 				conn = nil
-				v.status("Connexion perdue, reconnexion…")
+				v.status("Connection lost, reconnecting…")
 			}
 		case m := <-v.out:
 			if r, ok := m.(*proto.Resize); ok {
@@ -208,7 +208,7 @@ func (v *viewer) readLoop(c *transport.Conn) {
 		}
 		if p, ok := m.(*proto.Pong); ok {
 			rtt := time.Since(v.start) - time.Duration(p.Timestamp)*time.Microsecond
-			v.status(fmt.Sprintf("Connecté à %s (RTT %.1f ms) — cliquez ici pour piloter le Mac · Ctrl+Alt+Fin pour libérer",
+			v.status(fmt.Sprintf("Connected to %s (RTT %.1f ms) — click here to control the Mac · Ctrl+Alt+End to release",
 				c.PeerName, float64(rtt.Microseconds())/1000))
 		}
 	}

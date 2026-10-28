@@ -9,6 +9,6 @@ import (
 )
 
 func newInjector() (host.Injector, error) {
-	log.Print("pas sur macOS : les événements sont seulement journalisés")
+	log.Print("not on macOS: events are only logged")
 	return &host.LogInjector{Bounds: host.Rect{W: 1920, H: 1080}}, nil
 }
