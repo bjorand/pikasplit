@@ -186,3 +186,17 @@ func TestIdentityAndStorePersist(t *testing.T) {
 		t.Fatalf("lookup = %q %v", name, ok)
 	}
 }
+
+func TestStoreReplaceAndFind(t *testing.T) {
+	s, _ := OpenStore("")
+	a, _ := NewIdentity("a")
+	b, _ := NewIdentity("b")
+	s.Replace(a.Fingerprint, "10.0.0.2:7878")
+	s.Replace(b.Fingerprint, "10.0.0.2:7878")
+	if fp, ok := s.FindByName("10.0.0.2:7878"); !ok || fp != b.Fingerprint {
+		t.Fatalf("FindByName = %s %v", fp, ok)
+	}
+	if _, ok := s.Lookup(a.Fingerprint); ok {
+		t.Fatal("old fingerprint still trusted after Replace")
+	}
+}

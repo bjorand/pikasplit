@@ -5,6 +5,7 @@ import (
 	"errors"
 	"fmt"
 	"os"
+	"path/filepath"
 	"strings"
 	"sync"
 )
@@ -60,8 +61,27 @@ func (s *Store) Lookup(fp Fingerprint) (name string, ok bool) {
 	return name, ok
 }
 
+// FindByName returns the fingerprint recorded under name (the viewer stores
+// hosts by address).
+func (s *Store) FindByName(name string) (fp Fingerprint, ok bool) {
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	for p, n := range s.peers {
+		if n == name {
+			return p, true
+		}
+	}
+	return fp, false
+}
+
 // Add records fp and persists the store.
-func (s *Store) Add(fp Fingerprint, name string) error {
+func (s *Store) Add(fp Fingerprint, name string) error { return s.add(fp, name, false) }
+
+// Replace records fp under name, forgetting any other fingerprint stored
+// under the same name (a host that was re-paired).
+func (s *Store) Replace(fp Fingerprint, name string) error { return s.add(fp, name, true) }
+
+func (s *Store) add(fp Fingerprint, name string, replace bool) error {
 	name = strings.Map(func(r rune) rune {
 		if r == '\n' || r == '\r' {
 			return ' '
@@ -70,6 +90,13 @@ func (s *Store) Add(fp Fingerprint, name string) error {
 	}, name)
 	s.mu.Lock()
 	defer s.mu.Unlock()
+	if replace {
+		for p, n := range s.peers {
+			if n == name {
+				delete(s.peers, p)
+			}
+		}
+	}
 	s.peers[fp] = name
 	if s.path == "" {
 		return nil
@@ -83,4 +110,17 @@ func (s *Store) Add(fp Fingerprint, name string) error {
 		return err
 	}
 	return os.Rename(tmp, s.path)
+}
+
+// ConfigDir is where identity and trust stores live: $PIKASPLIT_DIR if set,
+// otherwise <user config dir>/pikasplit.
+func ConfigDir() (string, error) {
+	if d := os.Getenv("PIKASPLIT_DIR"); d != "" {
+		return d, nil
+	}
+	d, err := os.UserConfigDir()
+	if err != nil {
+		return "", err
+	}
+	return filepath.Join(d, "pikasplit"), nil
 }
