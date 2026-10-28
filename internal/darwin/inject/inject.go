@@ -97,6 +97,9 @@ func New() (*Injector, error) {
 	return &Injector{display: C.CGMainDisplayID()}, nil
 }
 
+// MainDisplayID returns the ID of the main display.
+func MainDisplayID() uint32 { return uint32(C.CGMainDisplayID()) }
+
 // SetDisplay changes the target display (e.g. the virtual display).
 func (i *Injector) SetDisplay(id uint32) { i.display = C.CGDirectDisplayID(id) }
 

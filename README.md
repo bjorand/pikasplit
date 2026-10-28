@@ -3,13 +3,14 @@
 Control a Mac from a window on a Windows PC, over the local network, so you no
 longer have to switch the monitor's input.
 
-- `pikasplit-host` runs on the Mac: it receives keyboard and mouse input and
-  injects it.
+- `pikasplit-host` runs on the Mac: it creates a virtual display sized to the
+  viewer window, receives keyboard and mouse input and injects it there.
 - `pikasplit-view` runs on the PC: while its window has focus, the PC's
   keyboard and mouse go to the Mac.
 
-Status: milestone 2 (keyboard/mouse only). The Mac's video in the window comes
-in later milestones.
+Status: milestone 3 (keyboard/mouse + virtual display). The Mac's video in the
+window comes in later milestones; until then, look at the virtual display from
+the Mac side (e.g. System Settings > Displays, or mirror it).
 
 ## Build
 
@@ -46,6 +47,21 @@ go build -o bin/pikasplit-view.exe ./cmd/pikasplit-view
   `pikasplit-host -swap-ctrl-cmd` makes the PC's Ctrl the Cmd key (Ctrl+C =
   Cmd+C).
 - `-iso=false` on the host if the Mac uses an ANSI (US) layout.
+
+## Virtual display
+
+While a viewer is connected, the Mac has an extra display named "pikasplit",
+sized to the viewer window and resized live when the window is resized. It is
+removed when the viewer disconnects, and macOS moves its windows back.
+
+- When Windows display scaling is 150% or more, the virtual display is HiDPI
+  (Retina): a 3840x2160 window gives a display that looks like 1920x1080.
+  `pikasplit-view -scale 1|2` forces it.
+- `pikasplit-host -max-size 5120x2880` raises the largest backing size
+  (default 3840x2160 pixels).
+- `pikasplit-host -virtual-display=false` drives the main display instead.
+- The display uses the private `CGVirtualDisplay` API (like DeskPad and
+  BetterDisplay); a future macOS release may break it.
 
 ## Development
 

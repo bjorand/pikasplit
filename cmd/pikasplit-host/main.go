@@ -1,5 +1,6 @@
-// pikasplit-host runs on the Mac: it accepts a paired viewer and injects the
-// keyboard and mouse input it receives.
+// pikasplit-host runs on the Mac: it accepts a paired viewer, gives it a
+// virtual display sized to its window, and injects the keyboard and mouse
+// input it receives.
 package main
 
 import (
@@ -26,14 +27,33 @@ func main() {
 	name := flag.String("name", hostname, "name shown to viewers")
 	iso := flag.Bool("iso", true, "the Mac uses an ISO keyboard layout (most European layouts)")
 	swap := flag.Bool("swap-ctrl-cmd", false, "PC Ctrl acts as Command, Windows key as Control")
+	virtual := flag.Bool("virtual-display", true, "drive a virtual display sized to the viewer window (otherwise the main display)")
+	maxSize := flag.String("max-size", "3840x2160", "largest virtual display backing size, in pixels")
 	flag.Parse()
 
-	if err := run(*listen, *pair, *name, keymap.Options{ISO: *iso, SwapCtrlCmd: *swap}); err != nil {
+	var maxW, maxH int
+	if _, err := fmt.Sscanf(*maxSize, "%dx%d", &maxW, &maxH); err != nil || maxW <= 0 || maxH <= 0 {
+		log.Fatalf("invalid -max-size %q, want WIDTHxHEIGHT", *maxSize)
+	}
+	opts := options{
+		listen: *listen, pair: *pair, name: *name,
+		keys:    keymap.Options{ISO: *iso, SwapCtrlCmd: *swap},
+		virtual: *virtual, maxW: maxW, maxH: maxH,
+	}
+	if err := runMain(func() error { return run(opts) }); err != nil {
 		log.Fatal(err)
 	}
 }
 
-func run(listen string, pair bool, name string, keys keymap.Options) error {
+type options struct {
+	listen, name string
+	pair         bool
+	keys         keymap.Options
+	virtual      bool
+	maxW, maxH   int
+}
+
+func run(o options) error {
 	inj, err := newInjector()
 	if err != nil {
 		return err
@@ -43,7 +63,7 @@ func run(listen string, pair bool, name string, keys keymap.Options) error {
 	if err != nil {
 		return err
 	}
-	id, err := transport.LoadOrCreateIdentity(dir, "pikasplit-host "+name)
+	id, err := transport.LoadOrCreateIdentity(dir, "pikasplit-host "+o.name)
 	if err != nil {
 		return err
 	}
@@ -51,15 +71,15 @@ func run(listen string, pair bool, name string, keys keymap.Options) error {
 	if err != nil {
 		return err
 	}
-	h := &transport.Host{ID: id, Name: name, Viewers: viewers}
+	h := &transport.Host{ID: id, Name: o.name, Viewers: viewers}
 
-	ln, err := h.Listen(listen)
+	ln, err := h.Listen(o.listen)
 	if err != nil {
 		return err
 	}
-	log.Printf("pikasplit-host %q listening on %s (code %s)", name, ln.Addr(), id.Fingerprint.ShortCode())
+	log.Printf("pikasplit-host %q listening on %s (code %s)", o.name, ln.Addr(), id.Fingerprint.ShortCode())
 
-	if pair {
+	if o.pair {
 		pin, err := h.StartPairing(5 * time.Minute)
 		if err != nil {
 			return err
@@ -77,7 +97,10 @@ func run(listen string, pair bool, name string, keys keymap.Options) error {
 		fmt.Println()
 	}
 
-	srv := &server{inj: inj, keys: keymap.New(keys)}
+	srv := &server{inj: inj, keys: keymap.New(o.keys)}
+	if o.virtual {
+		srv.screen = newScreen(inj, o.maxW, o.maxH)
+	}
 	for {
 		raw, err := ln.Accept()
 		if err != nil {
@@ -94,13 +117,23 @@ func run(listen string, pair bool, name string, keys keymap.Options) error {
 	}
 }
 
+// screen is the display the viewer drives.
+type screen interface {
+	// Resize sizes the display for a viewer surface of w x h pixels,
+	// creating it if needed.
+	Resize(w, h, scale int) error
+	// Close removes the display.
+	Close()
+}
+
 // server drives the injector from one viewer at a time; a new viewer takes
 // over from the previous one.
 type server struct {
-	inj  host.Injector
-	keys *keymap.Mapper
+	inj    host.Injector
+	keys   *keymap.Mapper
+	screen screen // nil: drive the main display
 
-	mu      sync.Mutex // serializes injection
+	mu      sync.Mutex // serializes injection and display changes
 	current *transport.Conn
 }
 
@@ -119,6 +152,9 @@ func (s *server) serve(c *transport.Conn) {
 		sess.Release()
 		if s.current == c {
 			s.current = nil
+			if s.screen != nil {
+				s.screen.Close()
+			}
 		}
 		s.mu.Unlock()
 		c.Close()
@@ -130,6 +166,11 @@ func (s *server) serve(c *transport.Conn) {
 			return
 		}
 		s.mu.Lock()
+		if r, ok := m.(*proto.Resize); ok && s.screen != nil {
+			if err := s.screen.Resize(int(r.W), int(r.H), int(r.Scale)); err != nil {
+				log.Printf("resize to %dx%d: %v", r.W, r.H, err)
+			}
+		}
 		reply := sess.Handle(m)
 		s.mu.Unlock()
 		if reply != nil {

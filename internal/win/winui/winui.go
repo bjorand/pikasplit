@@ -23,7 +23,7 @@ type Events struct {
 	Key    func(hid uint16, down bool)
 	Mouse  func(x, y int32, buttons uint8) // client pixels
 	Scroll func(dx, dy int16)              // WHEEL_DELTA units
-	Resize func(w, h int)                  // client pixels, debounced
+	Resize func(w, h, dpi int)             // client pixels, debounced
 	// Release is called when input stops going to the Mac (focus lost or
 	// capture suspended): the receiver must lift held keys and buttons.
 	Release func()
@@ -61,6 +61,7 @@ var (
 	pReleaseCapture                = user32.NewProc("ReleaseCapture")
 	pSetWindowTextW                = user32.NewProc("SetWindowTextW")
 	pSetProcessDpiAwarenessContext = user32.NewProc("SetProcessDpiAwarenessContext")
+	pGetDpiForWindow               = user32.NewProc("GetDpiForWindow")
 	pCreateSolidBrush              = gdi32.NewProc("CreateSolidBrush")
 	pSetTextColor                  = gdi32.NewProc("SetTextColor")
 	pSetBkMode                     = gdi32.NewProc("SetBkMode")
@@ -398,7 +399,11 @@ func wndProc(h, message, wParam, lParam uintptr) uintptr {
 		if wParam == resizeTimerID {
 			pKillTimer.Call(h, resizeTimerID)
 			if ev.Resize != nil {
-				ev.Resize(width, height)
+				dpi := uintptr(96)
+				if pGetDpiForWindow.Find() == nil {
+					dpi, _, _ = pGetDpiForWindow.Call(h)
+				}
+				ev.Resize(width, height, int(dpi))
 			}
 		}
 		return 0

@@ -26,6 +26,7 @@ func main() {
 	pairCode := flag.String("pair", "", "host code shown by pikasplit-host -pair (first connection only)")
 	pin := flag.String("pin", "", "pairing PIN shown by pikasplit-host -pair")
 	name := flag.String("name", hostname, "name shown to the Mac")
+	scale := flag.Int("scale", 0, "Mac display scale: 1, 2 (HiDPI), or 0 to follow the Windows display scaling")
 	flag.Parse()
 	if *addr == "" {
 		flag.Usage()
@@ -34,12 +35,12 @@ func main() {
 	if _, _, err := net.SplitHostPort(*addr); err != nil {
 		*addr = net.JoinHostPort(*addr, strconv.Itoa(proto.DefaultPort))
 	}
-	if err := run(*addr, *pairCode, *pin, *name); err != nil {
+	if err := run(*addr, *pairCode, *pin, *name, *scale); err != nil {
 		log.Fatal(err)
 	}
 }
 
-func run(addr, pairCode, pin, name string) error {
+func run(addr, pairCode, pin, name string, scale int) error {
 	dir, err := transport.ConfigDir()
 	if err != nil {
 		return err
@@ -82,10 +83,21 @@ func run(addr, pairCode, pin, name string) error {
 	go v.pingLoop()
 
 	return winui.Run(winui.Events{
-		Key:     v.key,
-		Mouse:   v.mouse,
-		Scroll:  func(dx, dy int16) { v.send(&proto.Scroll{DX: dx, DY: dy}) },
-		Resize:  func(w, h int) { v.send(&proto.Resize{W: uint16(w), H: uint16(h), Scale: 1}) },
+		Key:    v.key,
+		Mouse:  v.mouse,
+		Scroll: func(dx, dy int16) { v.send(&proto.Scroll{DX: dx, DY: dy}) },
+		Resize: func(w, h, dpi int) {
+			s := scale
+			if s == 0 {
+				// Windows at 150% scaling or more: the monitor is dense
+				// enough for a HiDPI Mac display.
+				s = 1
+				if dpi >= 144 {
+					s = 2
+				}
+			}
+			v.send(&proto.Resize{W: uint16(w), H: uint16(h), Scale: uint8(s)})
+		},
 		Release: v.release,
 	})
 }
