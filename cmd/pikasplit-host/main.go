@@ -29,6 +29,8 @@ func main() {
 	swap := flag.Bool("swap-ctrl-cmd", false, "PC Ctrl acts as Command, Windows key as Control")
 	virtual := flag.Bool("virtual-display", true, "drive a virtual display sized to the viewer window (otherwise the main display)")
 	maxSize := flag.String("max-size", "3840x2160", "largest virtual display backing size, in pixels")
+	fps := flag.Int("fps", 60, "video frame rate")
+	bitrate := flag.Int("bitrate", 40, "video bitrate, in Mbit/s")
 	flag.Parse()
 
 	var maxW, maxH int
@@ -39,6 +41,7 @@ func main() {
 		listen: *listen, pair: *pair, name: *name,
 		keys:    keymap.Options{ISO: *iso, SwapCtrlCmd: *swap},
 		virtual: *virtual, maxW: maxW, maxH: maxH,
+		video: videoOptions{fps: *fps, bitrate: *bitrate * 1_000_000},
 	}
 	if err := runMain(func() error { return run(opts) }); err != nil {
 		log.Fatal(err)
@@ -51,6 +54,11 @@ type options struct {
 	keys         keymap.Options
 	virtual      bool
 	maxW, maxH   int
+	video        videoOptions
+}
+
+type videoOptions struct {
+	fps, bitrate int
 }
 
 func run(o options) error {
@@ -99,7 +107,7 @@ func run(o options) error {
 
 	srv := &server{inj: inj, keys: keymap.New(o.keys)}
 	if o.virtual {
-		srv.screen = newScreen(inj, o.maxW, o.maxH)
+		srv.screen = newScreen(inj, o.maxW, o.maxH, o.video)
 	}
 	for {
 		raw, err := ln.Accept()
@@ -120,9 +128,13 @@ func run(o options) error {
 // screen is the display the viewer drives.
 type screen interface {
 	// Resize sizes the display for a viewer surface of w x h pixels,
-	// creating it if needed.
-	Resize(w, h, scale int) error
-	// Close removes the display.
+	// creating it if needed, and (re)starts streaming its video to sink.
+	// sink must not block.
+	Resize(w, h, scale int, sink func(*proto.VideoFrame)) error
+	// RequestKeyframe asks the video stream for a keyframe; it must not
+	// block.
+	RequestKeyframe()
+	// Close stops the video and removes the display.
 	Close()
 }
 
@@ -147,7 +159,24 @@ func (s *server) serve(c *transport.Conn) {
 	s.mu.Unlock()
 
 	sess := host.NewSession(s.inj, s.keys)
+	// The request runs on its own goroutine: Push is called from the
+	// encoder's callback, which must never wait on the screen (stopping a
+	// stream waits for its callbacks).
+	frames := host.NewFrameQueue(8, func() {
+		if s.screen != nil {
+			go s.screen.RequestKeyframe()
+		}
+	})
+	go func() {
+		for f := range frames.C {
+			if err := c.Send(f); err != nil {
+				c.Close()
+				return
+			}
+		}
+	}()
 	defer func() {
+		frames.Close()
 		s.mu.Lock()
 		sess.Release()
 		if s.current == c {
@@ -166,10 +195,15 @@ func (s *server) serve(c *transport.Conn) {
 			return
 		}
 		s.mu.Lock()
-		if r, ok := m.(*proto.Resize); ok && s.screen != nil {
-			if err := s.screen.Resize(int(r.W), int(r.H), int(r.Scale)); err != nil {
-				log.Printf("resize to %dx%d: %v", r.W, r.H, err)
+		switch m := m.(type) {
+		case *proto.Resize:
+			if s.screen != nil {
+				if err := s.screen.Resize(int(m.W), int(m.H), int(m.Scale), frames.Push); err != nil {
+					log.Printf("resize to %dx%d: %v", m.W, m.H, err)
+				}
 			}
+		case *proto.RequestKeyframe:
+			frames.Reset()
 		}
 		reply := sess.Handle(m)
 		s.mu.Unlock()

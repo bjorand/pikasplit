@@ -1,7 +1,8 @@
 //go:build windows
 
-// pikasplit-view runs on the PC: it opens a window and, while the window has
-// focus, forwards keyboard and mouse input to the paired Mac.
+// pikasplit-view runs on the PC: it shows the Mac's virtual display in a
+// window and, while the window has focus, forwards keyboard and mouse input
+// to the paired Mac.
 package main
 
 import (
@@ -13,6 +14,7 @@ import (
 	"os"
 	"path/filepath"
 	"strconv"
+	"sync"
 	"time"
 
 	"github.com/bjorand/pikasplit/internal/proto"
@@ -78,10 +80,15 @@ func run(addr, pairCode, pin, name string, scale int) error {
 		pressed: map[uint16]bool{},
 		start:   time.Now(),
 	}
+	v.video = newVideoPipeline(
+		func() { v.send(&proto.RequestKeyframe{}) },
+		func(fps float64) { v.update(func(u *uiState) { u.fps = fps }) },
+	)
 	v.status("Connecting…")
 	go v.connectLoop()
 	go v.pingLoop()
 
+	var lastW, lastH, lastScale int
 	return winui.Run(winui.Events{
 		Key:    v.key,
 		Mouse:  v.mouse,
@@ -96,6 +103,12 @@ func run(addr, pairCode, pin, name string, scale int) error {
 					s = 2
 				}
 			}
+			// Restoring a minimized window reports the same size again;
+			// resizing restarts the stream on the Mac, so skip it.
+			if w == lastW && h == lastH && s == lastScale {
+				return
+			}
+			lastW, lastH, lastScale = w, h, s
 			v.send(&proto.Resize{W: uint16(w), H: uint16(h), Scale: uint8(s)})
 		},
 		Release: v.release,
@@ -108,15 +121,46 @@ type viewer struct {
 	out   chan proto.Message
 	start time.Time
 
+	video *videoPipeline
+
 	// UI thread only.
 	pressed map[uint16]bool
 	mx, my  int32
 	buttons uint8
+
+	uiMu sync.Mutex
+	ui   uiState
 }
 
-func (v *viewer) status(text string) {
-	winui.SetStatus("pikasplit — "+v.addr, text)
+// uiState is what the window shows: text when there is no video, and
+// connection figures in the title bar.
+type uiState struct {
+	text string
+	peer string
+	rtt  time.Duration
+	fps  float64
 }
+
+func (v *viewer) update(fn func(u *uiState)) {
+	v.uiMu.Lock()
+	fn(&v.ui)
+	u := v.ui
+	v.uiMu.Unlock()
+
+	title := "pikasplit — " + v.addr
+	if u.peer != "" {
+		title = "pikasplit — " + u.peer
+		if u.rtt > 0 {
+			title += fmt.Sprintf(" · RTT %.1f ms", float64(u.rtt.Microseconds())/1000)
+		}
+		if u.fps > 0 {
+			title += fmt.Sprintf(" · %.0f fps", u.fps)
+		}
+	}
+	winui.SetStatus(title, u.text)
+}
+
+func (v *viewer) status(text string) { v.update(func(u *uiState) { u.text = text }) }
 
 // send queues a message without ever blocking the UI thread: when the queue
 // is full (network stalled), the message is dropped.
@@ -189,14 +233,21 @@ func (v *viewer) connectLoop() {
 		select {
 		case c := <-connected:
 			conn = c
-			v.status(fmt.Sprintf("Connected to %s — click here to control the Mac · Ctrl+Alt+End to release", c.PeerName))
+			v.update(func(u *uiState) {
+				u.peer = c.PeerName
+				u.text = "Connected, waiting for video — click here to control the Mac · Ctrl+Alt+End to release"
+			})
 			if lastResize != nil {
 				conn.Send(lastResize)
 			}
 		case c := <-lost:
 			if conn == c {
 				conn = nil
-				v.status("Connection lost, reconnecting…")
+				v.video.reset()
+				v.update(func(u *uiState) {
+					u.peer, u.rtt = "", 0
+					u.text = "Connection lost, reconnecting…"
+				})
 			}
 		case m := <-v.out:
 			if r, ok := m.(*proto.Resize); ok {
@@ -218,10 +269,12 @@ func (v *viewer) readLoop(c *transport.Conn) {
 		if err != nil {
 			return
 		}
-		if p, ok := m.(*proto.Pong); ok {
-			rtt := time.Since(v.start) - time.Duration(p.Timestamp)*time.Microsecond
-			v.status(fmt.Sprintf("Connected to %s (RTT %.1f ms) — click here to control the Mac · Ctrl+Alt+End to release",
-				c.PeerName, float64(rtt.Microseconds())/1000))
+		switch m := m.(type) {
+		case *proto.VideoFrame:
+			v.video.push(m)
+		case *proto.Pong:
+			rtt := time.Since(v.start) - time.Duration(m.Timestamp)*time.Microsecond
+			v.update(func(u *uiState) { u.rtt = rtt })
 		}
 	}
 }

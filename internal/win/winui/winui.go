@@ -52,6 +52,11 @@ var (
 	pBeginPaint                    = user32.NewProc("BeginPaint")
 	pEndPaint                      = user32.NewProc("EndPaint")
 	pFillRect                      = user32.NewProc("FillRect")
+	pSetCursor                     = user32.NewProc("SetCursor")
+	pStretchDIBits                 = gdi32.NewProc("StretchDIBits")
+	pSetStretchBltMode             = gdi32.NewProc("SetStretchBltMode")
+	pCreateFontW                   = gdi32.NewProc("CreateFontW")
+	pSelectObject                  = gdi32.NewProc("SelectObject")
 	pDrawTextW                     = user32.NewProc("DrawTextW")
 	pGetClientRect                 = user32.NewProc("GetClientRect")
 	pInvalidateRect                = user32.NewProc("InvalidateRect")
@@ -66,6 +71,8 @@ var (
 	pSetTextColor                  = gdi32.NewProc("SetTextColor")
 	pSetBkMode                     = gdi32.NewProc("SetBkMode")
 	pGetModuleHandleW              = kernel32.NewProc("GetModuleHandleW")
+	pVirtualAlloc                  = kernel32.NewProc("VirtualAlloc")
+	pVirtualFree                   = kernel32.NewProc("VirtualFree")
 )
 
 const (
@@ -87,7 +94,13 @@ const (
 	wmXButtonUp     = 0x020C
 	wmMouseHWheel   = 0x020E
 	wmMouseActivate = 0x0021
+	wmSetCursor     = 0x0020
 	wmApp           = 0x8000
+	wmAppFrame      = 0x8001
+
+	htClient     = 1
+	srcCopy      = 0x00CC0020
+	colorOnColor = 3
 
 	maActivateAndEat = 2
 
@@ -110,10 +123,10 @@ const (
 	resizeTimerID  = 1
 	resizeDebounce = 300 // ms
 
-	dtCenter     = 0x01
-	dtVCenter    = 0x04
-	dtSingleLine = 0x20
-	transparent  = 1
+	dtCenter    = 0x01
+	dtWordBreak = 0x10
+	dtCalcRect  = 0x400
+	transparent = 1
 )
 
 // HID usages used by the suspend hotkey.
@@ -184,7 +197,71 @@ var (
 	statusMu sync.Mutex
 	status   string
 	title    string
+
+	font    uintptr // status text font, created for the window DPI
+	fontDPI uintptr
+
+	frameMu sync.Mutex
+	frame   []byte // top-down BGRA, nil when there is no video
+	frameW  int
+	frameH  int
 )
+
+type bitmapInfoHeader struct {
+	size          uint32
+	width         int32
+	height        int32
+	planes        uint16
+	bitCount      uint16
+	compression   uint32
+	sizeImage     uint32
+	xPelsPerMeter int32
+	yPelsPerMeter int32
+	clrUsed       uint32
+	clrImportant  uint32
+}
+
+// NewFrameBuffer allocates n bytes for a picture passed to SetFrame. GDI
+// refuses to paint large buffers from the Go heap (which is committed in
+// several VirtualAlloc regions a large object can straddle), so frames live
+// in a single VirtualAlloc region. Release with FreeFrameBuffer.
+func NewFrameBuffer(n int) []byte {
+	const memCommitReserve, pageReadWrite = 0x3000, 0x04
+	p, _, _ := pVirtualAlloc.Call(0, uintptr(n), memCommitReserve, pageReadWrite)
+	if p == 0 {
+		panic("winui: out of memory for a frame buffer")
+	}
+	return unsafe.Slice(*(**byte)(unsafe.Pointer(&p)), n)
+}
+
+// FreeFrameBuffer releases a buffer from NewFrameBuffer. The window must no
+// longer reference it (see SetFrame).
+func FreeFrameBuffer(b []byte) {
+	const memRelease = 0x8000
+	if cap(b) > 0 {
+		pVirtualFree.Call(uintptr(unsafe.Pointer(&b[:1][0])), 0, memRelease)
+	}
+}
+
+// SetFrame shows a w x h top-down BGRA picture from NewFrameBuffer,
+// stretched to the window if sizes differ. It returns the previously shown buffer, which the caller
+// may reuse: the window no longer references it. nil clears the video and
+// shows the status text again. Safe to call from any goroutine.
+func SetFrame(bgra []byte, w, h int) (prev []byte) {
+	frameMu.Lock()
+	prev, frame, frameW, frameH = frame, bgra, w, h
+	frameMu.Unlock()
+	if hwnd != 0 {
+		pPostMessageW.Call(hwnd, wmAppFrame, 0, 0)
+	}
+	return prev
+}
+
+func hasFrame() bool {
+	frameMu.Lock()
+	defer frameMu.Unlock()
+	return frame != nil
+}
 
 // SetStatus updates the text shown in the window and its title. It is safe
 // to call from any goroutine.
@@ -388,6 +465,12 @@ func wndProc(h, message, wParam, lParam uintptr) uintptr {
 	case wmMouseActivate:
 		// The click that brings the window to the front is not forwarded.
 		return maActivateAndEat
+	case wmSetCursor:
+		// The Mac cursor is part of the video: hide ours over it.
+		if lParam&0xFFFF == htClient && active() && hasFrame() {
+			pSetCursor.Call(0)
+			return 1
+		}
 	case wmSize:
 		width, height = int(lParam&0xFFFF), int((lParam>>16)&0xFFFF)
 		if width > 0 && height > 0 {
@@ -414,6 +497,9 @@ func wndProc(h, message, wParam, lParam uintptr) uintptr {
 		pSetWindowTextW.Call(h, uintptr(unsafe.Pointer(t)))
 		invalidate()
 		return 0
+	case wmAppFrame:
+		pInvalidateRect.Call(h, 0, 0)
+		return 0
 	case wmEraseBkgnd:
 		return 1
 	case wmPaint:
@@ -433,17 +519,62 @@ func paint(h uintptr) {
 	defer pEndPaint.Call(h, uintptr(unsafe.Pointer(&ps)))
 	var rc rect
 	pGetClientRect.Call(h, uintptr(unsafe.Pointer(&rc)))
-	pFillRect.Call(hdc, uintptr(unsafe.Pointer(&rc)), brush)
+
+	frameMu.Lock()
+	if frame != nil {
+		bi := bitmapInfoHeader{width: int32(frameW), height: -int32(frameH), planes: 1, bitCount: 32}
+		bi.size = uint32(unsafe.Sizeof(bi))
+		pSetStretchBltMode.Call(hdc, colorOnColor)
+		pStretchDIBits.Call(hdc, 0, 0, uintptr(rc.right), uintptr(rc.bottom),
+			0, 0, uintptr(frameW), uintptr(frameH),
+			uintptr(unsafe.Pointer(&frame[0])), uintptr(unsafe.Pointer(&bi)), 0, srcCopy)
+	}
+	video := frame != nil
+	frameMu.Unlock()
 
 	statusMu.Lock()
 	text := status
 	statusMu.Unlock()
+	if video {
+		text = ""
+	}
 	if suspended {
 		text = "Capture paused — click in the window to resume"
 	}
+	if !video {
+		pFillRect.Call(hdc, uintptr(unsafe.Pointer(&rc)), brush)
+	}
+	if text == "" {
+		return
+	}
 	s, _ := syscall.UTF16FromString(text)
+	pSelectObject.Call(hdc, statusFont(h))
 	pSetTextColor.Call(hdc, 0x00E0E0E0)
 	pSetBkMode.Call(hdc, transparent)
+	// Wrap within margins, then center the block vertically.
+	margin := rc.right / 10
+	box := rect{left: margin, right: rc.right - margin}
 	pDrawTextW.Call(hdc, uintptr(unsafe.Pointer(&s[0])), uintptr(len(s)-1),
-		uintptr(unsafe.Pointer(&rc)), dtCenter|dtVCenter|dtSingleLine)
+		uintptr(unsafe.Pointer(&box)), dtCenter|dtWordBreak|dtCalcRect)
+	textH := box.bottom
+	box = rect{left: margin, right: rc.right - margin, top: (rc.bottom - textH) / 2}
+	box.bottom = box.top + textH
+	pDrawTextW.Call(hdc, uintptr(unsafe.Pointer(&s[0])), uintptr(len(s)-1),
+		uintptr(unsafe.Pointer(&box)), dtCenter|dtWordBreak)
+}
+
+// statusFont returns an 11 pt Segoe UI font for the window's DPI.
+func statusFont(h uintptr) uintptr {
+	dpi := uintptr(96)
+	if pGetDpiForWindow.Find() == nil {
+		dpi, _, _ = pGetDpiForWindow.Call(h)
+	}
+	if font == 0 || dpi != fontDPI {
+		face, _ := syscall.UTF16PtrFromString("Segoe UI")
+		height := -int32(11 * dpi / 72)
+		font, _, _ = pCreateFontW.Call(uintptr(height), 0, 0, 0, 400, 0, 0, 0, 1, 0, 0, 5, 0,
+			uintptr(unsafe.Pointer(face)))
+		fontDPI = dpi
+	}
+	return font
 }
